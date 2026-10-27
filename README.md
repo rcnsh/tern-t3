@@ -99,3 +99,7 @@ tern plugin reload      # pick up edits
 `luau-lsp` comes from its [GitHub releases](https://github.com/JohnnyMorganz/luau-lsp/releases).
 To test in a separate window, start one with `tern --control /tmp/t3.sock ~/some/project` and drive it with
 `tern ctl --control /tmp/t3.sock plugins run plugin.t3.threads`.
+
+## License
+
+[MIT](LICENSE)
