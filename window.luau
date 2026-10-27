@@ -16,7 +16,7 @@ local THREADS = "t3.threads"
 -- the project list is reused before it is read again.
 local TICK_MS = 15 * 1000
 local PROJECTS_MS = 60 * 1000
--- Terminal lines sent along with "Ask T3 about the last command".
+-- Terminal lines sent along with "Send terminal output to a new T3 thread".
 local CONTEXT_LINES = 120
 
 local function focused(cx: WindowCx): PaneInfo?
@@ -142,7 +142,7 @@ local function recent_output(cx: WindowCx, pane: number): string
 	return ""
 end
 
-local function ask_about_last(cx: WindowCx)
+local function send_output(cx: WindowCx)
 	local pane = focused(cx)
 	if pane == nil then
 		return
@@ -196,7 +196,7 @@ local function open_app(cx: WindowCx)
 end
 
 tern.command({ id = "new", title = "New T3 thread", icon = "sparkle", run = new_thread })
-tern.command({ id = "ask", title = "Ask T3 about the last command", icon = "sparkle", run = ask_about_last })
+tern.command({ id = "send-output", title = "Send terminal output to a new T3 thread", icon = "sparkle", run = send_output })
 tern.command({ id = "threads", title = "Show T3 threads", icon = "list", run = show_threads })
 tern.command({ id = "app", title = "Open project in T3 Code", icon = "open", run = open_app })
 

@@ -9,7 +9,7 @@ it needs T3 Code running on the machine that runs your panes.
 | Where | What |
 | --- | --- |
 | Palette | **New T3 thread**: asks for a message and starts a thread in the focused pane's project, opened beside it. |
-| Palette | **Ask T3 about the last command**: starts a thread with your instruction, the last command, its exit status and the pane's recent output. |
+| Palette | **Send terminal output to a new T3 thread**: asks what you want done, then starts a thread with that, the last command, its exit status and the pane's last 120 lines. |
 | Palette | **Show T3 threads**: a block listing the project's threads (↑/↓, ↵ open, `a` open in the app, `r` refresh). |
 | Palette | **Open project in T3 Code**: `t3 app <cwd>`. |
 | Block | **T3 thread**: title, status, model, branch, PRs and the latest 30 messages (older ones folded); type and ↵ to send, ⌥↵ for a new line, Esc to clear. Polls every 3 s while the agent works, 15 s otherwise. |
