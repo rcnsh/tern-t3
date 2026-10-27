@@ -30,9 +30,15 @@ You need [Tern](https://docs.stencil.so/tern/) and the [T3 Code](https://github.
 desktop app on the same machine. The app installs the `t3` CLI this plugin drives.
 
 ```sh
-git clone <this repo> ~/dev/tern-t3
-tern plugin link ~/dev/tern-t3
+tern plugin install github.com/rcnsh/tern-t3
 tern plugin list        # t3 0.1.0 T3 Code — 2 blocks, 0 lenses, window  ready
+```
+
+To hack on it, clone it and link the clone instead:
+
+```sh
+git clone https://github.com/rcnsh/tern-t3 ~/dev/tern-t3
+tern plugin link ~/dev/tern-t3
 ```
 
 ## Usage
