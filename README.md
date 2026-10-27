@@ -2,7 +2,7 @@
 
 # T3 Code for Tern
 
-**Your [T3 Code](https://github.com/pingdotgg/t3code) agent threads, inside the [Tern](https://docs.stencil.so/tern/) terminal.**
+**Your [T3 Code](https://t3.codes) agent threads, inside the [Tern](https://stencil.so/tern) terminal.**
 
 Start a thread from any pane, hand an agent your failing command, and read and reply to threads
 in native Tern blocks, without leaving the terminal.
@@ -26,7 +26,7 @@ in native Tern blocks, without leaving the terminal.
 
 ## Install
 
-You need [Tern](https://docs.stencil.so/tern/) and the [T3 Code](https://github.com/pingdotgg/t3code)
+You need [Tern](https://stencil.so/tern) and the [T3 Code](https://t3.codes)
 desktop app on the same machine. The app installs the `t3` CLI this plugin drives.
 
 ```sh
