@@ -106,7 +106,12 @@ type ThreadRow = {
 
 type ListState = {
 	cx: BlockCx,
+	-- A project id, or a path `t3` resolves to one.
 	project: string,
+	name: string,
+	-- Set when `project` isn't in a T3 Code project: the projects to choose from.
+	choices: { common.Project }?,
+	choice: string?,
 	threads: { ThreadRow }?,
 	cursor: string?,
 	loading: boolean,
@@ -163,7 +168,25 @@ local function refresh_list(state: ListState)
 				state.cursor = if rows[1] then rows[1].id else nil
 			end
 		else
-			state.problem = { text = "`t3 thread list` failed for `" .. state.project .. "`.", detail = common.why(result) }
+			local why = common.why(result)
+			if string.find(why, "No T3 Code project", 1, true) then
+				-- Not a project folder: offer the projects instead of failing.
+				common.projects(function(projects, err)
+					if not alive(state) then
+						return
+					end
+					if projects and #projects > 0 then
+						state.choices = projects
+						state.choice = projects[1].id
+						state.problem = nil
+					else
+						state.problem = { text = "`" .. state.project .. "` isn't in a T3 Code project.", detail = err or why }
+					end
+					state.cx:render()
+				end)
+				return
+			end
+			state.problem = { text = "`t3 thread list` failed for `" .. state.name .. "`.", detail = why }
 		end
 		state.cx:render()
 		poll(state, busy, refresh_list)
@@ -256,6 +279,80 @@ local function list_dock(state: ListState): Node
 	})
 end
 
+local PROJECTS_ID = "main.projects."
+
+local function choices(state: ListState): { common.Project }
+	return state.choices or {}
+end
+
+-- The projects to choose from when the block's folder isn't in one.
+local function choices_view(state: ListState): Node
+	local items: { Item } = {}
+	for _, pr in choices(state) do
+		table.insert(items, { label = { ui.span(pr.title) }, value = { ui.span(pr.root, "muted") }, icon = "folder" })
+	end
+	local list = ui.list(items)
+	local kids = list.c or {}
+	for i, pr in choices(state) do
+		local p: { [string]: any } = kids[i].p or {}
+		p.key = pr.id
+		kids[i].p = p
+	end
+	local p: { [string]: any } = list.p or {}
+	p.key = "projects"
+	p.selected = if state.choice then PROJECTS_ID .. state.choice else nil
+	p.max = { lines = math.max(4, math.floor((state.cx.rows - 6) * 0.72)) }
+	list.p = p
+	local head = ui.text({ ui.span("`" .. state.name .. "` isn't in a T3 Code project. Pick one:", "muted") })
+	return ui.col({ head, list })
+end
+
+local function choose(state: ListState, id: string?)
+	for _, pr in choices(state) do
+		if pr.id == id then
+			state.project = pr.id
+			state.name = pr.title
+			state.choices = nil
+			state.choice = nil
+			state.cx:save()
+			refresh_list(state)
+			return
+		end
+	end
+end
+
+local function choice_key(state: ListState, key: Key): boolean?
+	local list = choices(state)
+	local i = 0
+	for n, pr in list do
+		if pr.id == state.choice then
+			i = n
+		end
+	end
+	local k = key.text or key.name
+	local to: number? = nil
+	if key.name == "up" or k == "k" then
+		to = i - 1
+	elseif key.name == "down" or k == "j" then
+		to = i + 1
+	elseif key.name == "home" or k == "g" then
+		to = 1
+	elseif key.name == "end" or k == "G" then
+		to = #list
+	elseif key.name == "enter" or k == "o" then
+		choose(state, state.choice)
+		return true
+	end
+	if to == nil then
+		return false
+	end
+	local pr = list[math.clamp(to, 1, math.max(1, #list))]
+	if pr then
+		state.choice = pr.id
+	end
+	return true
+end
+
 local function move(state: ListState, to: number)
 	local list = rows(state)
 	local r = list[math.clamp(to, 1, math.max(1, #list))]
@@ -266,13 +363,18 @@ end
 
 tern.block.define("threads", {
 	init = function(cx: BlockCx, args: { string }, saved: any): ListState
-		local project = args[1]
-			or (if type(saved) == "table" and type(saved.project) == "string" then saved.project else nil)
-			or cx.cwd
-			or "."
+		local old = if type(saved) == "table" then saved else {}
+		local project = args[1] or (if type(old.project) == "string" then old.project else nil) or cx.cwd or "."
+		local name = args[2]
+			or (if args[1] == nil and type(old.name) == "string" then old.name else nil)
+			or string.match(project, "([^/]+)/?$")
+			or project
 		local state: ListState = {
 			cx = cx,
 			project = project,
+			name = name,
+			choices = nil,
+			choice = nil,
 			threads = nil,
 			cursor = nil,
 			loading = false,
@@ -285,12 +387,13 @@ tern.block.define("threads", {
 	end,
 
 	title = function(state: ListState): string?
-		local name = string.match(state.project, "([^/]+)/?$") or state.project
-		return "T3 · " .. name
+		return "T3 · " .. state.name
 	end,
 
 	view = function(state: ListState, _cx: BlockCx): BlockView
-		if state.threads then
+		if state.choices then
+			return { main = ui.col({ choices_view(state) }) }
+		elseif state.threads then
 			return { main = ui.col({ list_view(state) }), dock = list_dock(state) }
 		elseif state.problem then
 			return { main = ui.col({ problem_card("Could not load threads", state.problem) }) }
@@ -301,6 +404,9 @@ tern.block.define("threads", {
 	key = function(state: ListState, key: Key, cx: BlockCx): boolean?
 		if key.ctrl or key.alt or key.meta then
 			return false
+		end
+		if state.choices then
+			return choice_key(state, key)
 		end
 		local i = cursor_index(state)
 		local k = key.text or key.name
@@ -335,6 +441,11 @@ tern.block.define("threads", {
 	event = function(state: ListState, ev: UiEvent, cx: BlockCx)
 		if ev.ev == "action" and ev.act == "refresh" then
 			refresh_list(state)
+		elseif (ev.ev == "select" or ev.ev == "activate") and type(ev.item) == "string" and state.choices then
+			state.choice = string.sub(ev.item, #PROJECTS_ID + 1)
+			if ev.ev == "activate" then
+				choose(state, state.choice)
+			end
 		elseif (ev.ev == "select" or ev.ev == "activate") and type(ev.item) == "string" then
 			state.cursor = string.sub(ev.item, #LIST_ID + 1)
 			if ev.ev == "activate" then
@@ -344,7 +455,7 @@ tern.block.define("threads", {
 	end,
 
 	save = function(state: ListState): any
-		return { project = state.project }
+		return { project = state.project, name = state.name }
 	end,
 })
 

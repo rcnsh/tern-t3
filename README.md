@@ -8,7 +8,7 @@ it needs T3 Code running on the machine that runs your panes.
 
 | Where | What |
 | --- | --- |
-| Palette | **New T3 thread here**: asks for a message and starts a thread in the focused pane's project, opened beside it. |
+| Palette | **New T3 thread**: asks for a message and starts a thread in the focused pane's project, opened beside it. |
 | Palette | **Ask T3 about the last command**: starts a thread with your instruction, the last command, its exit status and the pane's recent output. |
 | Palette | **Show T3 threads**: a block listing the project's threads (↑/↓, ↵ open, `a` open in the app, `r` refresh). |
 | Palette | **Open project in T3 Code**: `t3 app <cwd>`. |
@@ -16,7 +16,7 @@ it needs T3 Code running on the machine that runs your panes.
 | Links | `t3-thread://v1/<id>` opens a thread block; ⌘-click opens the thread in the desktop app (`t3code://threads/<env>/<id>`). |
 | Status line | `T3 2 running · 1 waiting` for the focused pane's project; click to open the thread list. |
 
-Directories that aren't a T3 Code project are skipped (add one with `t3 project add <dir>`).
+Commands use the project holding the focused pane's directory. Anywhere else (your home folder, a scratch dir) they ask which project, from the list in T3 Code's state database (`~/.t3/userdata/statev2.sqlite`, read-only via `/usr/bin/sqlite3`), since the `t3` CLI can't list projects. The status line only runs `t3` for directories inside a project.
 
 ## Install
 

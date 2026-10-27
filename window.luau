@@ -2,15 +2,20 @@
 -- The window half: palette commands that start and open T3 Code threads from
 -- the focused pane, routing of `t3-thread://` links to thread blocks, and a
 -- status line segment counting the focused project's busy threads.
+--
+-- Commands use the project holding the focused pane's directory, and ask
+-- which project when it isn't in one.
 
 local common = require("./common")
+
+type Project = common.Project
 
 local THREAD = "t3.thread"
 local THREADS = "t3.threads"
 -- How often the status line rechecks the focused pane's project, and how long
--- a directory that isn't a T3 Code project is left alone.
+-- the project list is reused before it is read again.
 local TICK_MS = 15 * 1000
-local NOT_PROJECT_MS = 2 * 60 * 1000
+local PROJECTS_MS = 60 * 1000
 -- Terminal lines sent along with "Ask T3 about the last command".
 local CONTEXT_LINES = 120
 
@@ -31,23 +36,83 @@ local function first_line(s: string): string
 	return string.match(s, "^%s*([^\n]-)%s*$") or s
 end
 
--- Starts a thread in `cwd`'s project with `message` and opens it beside.
-local function start_thread(cx: WindowCx, cwd: string, message: string)
-	local err = common.run({ "thread", "start", cwd, "-" }, message, function(result, cx2)
+---------------------------------------------------------------------------
+-- Projects
+---------------------------------------------------------------------------
+
+local projects: { Project }? = nil
+local projects_at = -math.huge
+local loading_projects: { (({ Project }?, string?, WindowCx?) -> ()) }? = nil
+
+-- The project list, from the cache while it's fresh. Concurrent callers share
+-- one read.
+local function load_projects(done: ({ Project }?, string?, WindowCx?) -> ())
+	if projects and tern.now() - projects_at < PROJECTS_MS then
+		done(projects, nil, nil)
+		return
+	end
+	if loading_projects then
+		table.insert(loading_projects, done)
+		return
+	end
+	local waiting = { done }
+	loading_projects = waiting
+	common.projects(function(list, err, cx)
+		loading_projects = nil
+		if list then
+			projects = list
+			projects_at = tern.now()
+		end
+		for _, fn in waiting do
+			fn(list or projects, err, cx)
+		end
+	end)
+end
+
+-- Calls `fn` with the project holding `cwd`, or the one the user picks when
+-- no project holds it. `cx` is used only until the first callback returns.
+local function with_project(cx: WindowCx, cwd: string?, fn: (Project, WindowCx) -> ())
+	load_projects(function(list, err, cx2)
+		local c = cx2 or cx
+		if list == nil or #list == 0 then
+			c:toast("error", "No T3 Code projects", err or "Add one with `t3 project add <dir>`.")
+			return
+		end
+		local match = if cwd then common.project_for(list, cwd) else nil
+		if match then
+			fn(match, c)
+			return
+		end
+		local items: { PickItem } = {}
+		for _, p in list do
+			table.insert(items, { label = p.title, detail = p.root, icon = "folder", project = p })
+		end
+		c:pick({ items = items, placeholder = "T3 Code project", icon = "sparkle", action = "use" })
+			:next(function(item, _err, cx3)
+				if item and cx3 then
+					fn(item.project :: Project, cx3)
+				end
+			end)
+	end)
+end
+
+---------------------------------------------------------------------------
+-- Commands
+---------------------------------------------------------------------------
+
+-- Starts a thread in `project` with `message` and opens it beside.
+local function start_thread(cx: WindowCx, project: Project, message: string)
+	local err = common.run({ "thread", "start", project.id, "-" }, message, function(result, cx2)
 		if cx2 == nil then
 			return
 		end
 		if result.status ~= 0 then
-			local why = common.why(result)
-			if string.find(why, "No T3 Code project", 1, true) then
-				why = why .. "\nAdd it with `t3 project add " .. cwd .. "`."
-			end
-			cx2:toast("error", "T3 didn't start the thread", why)
+			cx2:toast("error", "T3 didn't start the thread", common.why(result))
 			return
 		end
 		local id = first_line(result.stdout)
 		if cx2:new_block(THREAD, { id }, "beside") == nil then
-			cx2:toast("success", "Thread started", id)
+			cx2:toast("success", "Thread started in " .. project.title, id)
 		end
 	end)
 	if err then
@@ -56,17 +121,14 @@ local function start_thread(cx: WindowCx, cwd: string, message: string)
 end
 
 local function new_thread(cx: WindowCx)
-	local cwd = focused_cwd(cx)
-	if cwd == nil then
-		cx:toast("error", "No directory", "Focus a shell in a T3 Code project first.")
-		return
-	end
-	cx:prompt({ placeholder = "Message for a new T3 thread in " .. cwd, icon = "sparkle", action = "start" })
-		:next(function(text, _err, cx2)
-			if text and cx2 and string.find(text, "%S") then
-				start_thread(cx2, cwd, text)
-			end
-		end)
+	with_project(cx, focused_cwd(cx), function(project, cx2)
+		cx2:prompt({ placeholder = "Message for a new thread in " .. project.title, icon = "sparkle", action = "start" })
+			:next(function(text, _err, cx3)
+				if text and cx3 and string.find(text, "%S") then
+					start_thread(cx3, project, text)
+				end
+			end)
+	end)
 end
 
 -- The focused terminal's recent text, last command included.
@@ -82,70 +144,60 @@ end
 
 local function ask_about_last(cx: WindowCx)
 	local pane = focused(cx)
-	if pane == nil or pane.cwd == nil or pane.cwd == "" then
-		cx:toast("error", "No directory", "Focus a shell in a T3 Code project first.")
+	if pane == nil then
 		return
 	end
-	local cwd = pane.cwd :: string
+	-- Read the pane now: the cx is gone once the picker or prompt answers.
+	local cwd = if pane.cwd and pane.cwd ~= "" then pane.cwd else nil
 	local last = pane.last
 	local output = recent_output(cx, pane.pane)
 	local suggestion = if last and last.status ~= 0 then "Why did this fail? Fix it." else ""
-	cx:prompt({
-		value = suggestion,
-		placeholder = "What should T3 do with this output?",
-		icon = "sparkle",
-		action = "start",
-	}):next(function(text, _err, cx2)
-		if text == nil or cx2 == nil then
-			return
-		end
-		local parts = { text, "", "From my terminal in `" .. cwd .. "`:" }
-		if last then
-			table.insert(parts, "Last command: `" .. last.line .. "` (exit " .. last.status .. ", " .. last.took_ms .. " ms)")
-		end
-		table.insert(parts, "```")
-		table.insert(parts, output)
-		table.insert(parts, "```")
-		start_thread(cx2, cwd, table.concat(parts, "\n"))
+	with_project(cx, cwd, function(project, cx2)
+		cx2:prompt({
+			value = suggestion,
+			placeholder = "What should T3 do with this output?",
+			icon = "sparkle",
+			action = "start",
+		}):next(function(text, _err, cx3)
+			if text == nil or cx3 == nil then
+				return
+			end
+			local parts = { text, "", "From my terminal in `" .. (cwd or project.root) .. "`:" }
+			if last then
+				table.insert(parts, "Last command: `" .. last.line .. "` (exit " .. last.status .. ", " .. last.took_ms .. " ms)")
+			end
+			table.insert(parts, "```")
+			table.insert(parts, output)
+			table.insert(parts, "```")
+			start_thread(cx3, project, table.concat(parts, "\n"))
+		end)
 	end)
 end
 
 local function show_threads(cx: WindowCx)
-	local cwd = focused_cwd(cx)
-	if cwd == nil then
-		cx:toast("error", "No directory", "Focus a shell in a T3 Code project first.")
-		return
-	end
-	if cx:new_block(THREADS, { cwd }, "beside") == nil then
-		cx:toast("error", "T3 Code plugin isn't loaded on this host", "Install it where your panes run.")
-	end
+	with_project(cx, focused_cwd(cx), function(project, cx2)
+		if cx2:new_block(THREADS, { project.id, project.title }, "beside") == nil then
+			cx2:toast("error", "T3 Code plugin isn't loaded on this host", "Install it where your panes run.")
+		end
+	end)
 end
 
 local function open_app(cx: WindowCx)
-	local cwd = focused_cwd(cx) or "."
-	local err = common.run({ "app", cwd }, nil, function(result, cx2)
-		if result.status ~= 0 and cx2 then
-			cx2:toast("error", "Couldn't open T3 Code", common.why(result))
+	with_project(cx, focused_cwd(cx), function(project, cx2)
+		local err = common.run({ "app", project.root }, nil, function(result, cx3)
+			if result.status ~= 0 and cx3 then
+				cx3:toast("error", "Couldn't open T3 Code", common.why(result))
+			end
+		end)
+		if err then
+			cx2:toast("error", "Couldn't start t3", err)
 		end
 	end)
-	if err then
-		cx:toast("error", "Couldn't start t3", err)
-	end
 end
 
-local function has_cwd(cx: WindowCx): boolean
-	return focused_cwd(cx) ~= nil
-end
-
-tern.command({ id = "new", title = "New T3 thread here", icon = "sparkle", available = has_cwd, run = new_thread })
-tern.command({
-	id = "ask",
-	title = "Ask T3 about the last command",
-	icon = "sparkle",
-	available = has_cwd,
-	run = ask_about_last,
-})
-tern.command({ id = "threads", title = "Show T3 threads", icon = "list", available = has_cwd, run = show_threads })
+tern.command({ id = "new", title = "New T3 thread", icon = "sparkle", run = new_thread })
+tern.command({ id = "ask", title = "Ask T3 about the last command", icon = "sparkle", run = ask_about_last })
+tern.command({ id = "threads", title = "Show T3 threads", icon = "list", run = show_threads })
 tern.command({ id = "app", title = "Open project in T3 Code", icon = "open", run = open_app })
 
 -- `t3-thread://v1/<id>` links (T3 Code writes them in replies and `t3 thread
@@ -168,22 +220,22 @@ end)
 -- Status line: busy threads in the focused pane's project
 ---------------------------------------------------------------------------
 
-type Counts = { live: number, waiting: number, project: boolean, at: number }
+type Counts = { live: number, waiting: number }
 
+-- By project id.
 local counts: { [string]: Counts } = {}
 local fetching: { [string]: boolean } = {}
 local tick: TimerHandle? = nil
 
-local function fetch(cwd: string)
-	local known = counts[cwd]
-	if fetching[cwd] or (known and not known.project and tern.now() - known.at < NOT_PROJECT_MS) then
+local function fetch(project: Project)
+	if fetching[project.id] then
 		return
 	end
-	fetching[cwd] = true
-	local err = common.run({ "thread", "list", "--project", cwd, "--json" }, nil, function(result, _cx)
-		fetching[cwd] = nil
+	fetching[project.id] = true
+	local err = common.run({ "thread", "list", "--project", project.id, "--json" }, nil, function(result, _cx)
+		fetching[project.id] = nil
 		local data = common.json(result)
-		local c: Counts = { live = 0, waiting = 0, project = type(data) == "table", at = tern.now() }
+		local c: Counts = { live = 0, waiting = 0 }
 		for _, t in (if type(data) == "table" then data else {}) do
 			local status = if type(t) == "table" then tostring(t.status) else ""
 			if common.live(status) then
@@ -192,19 +244,26 @@ local function fetch(cwd: string)
 				c.waiting += 1
 			end
 		end
-		counts[cwd] = c
+		counts[project.id] = c
 		tern.chrome.refresh()
 	end)
 	if err then
-		fetching[cwd] = nil
+		fetching[project.id] = nil
 	end
 end
 
+-- Only directories inside a project cost a `t3` run.
 local function check_focused(cx: WindowCx)
 	local cwd = focused_cwd(cx)
-	if cwd then
-		fetch(cwd)
+	if cwd == nil then
+		return
 	end
+	load_projects(function(list)
+		local project = if list then common.project_for(list, cwd) else nil
+		if project then
+			fetch(project)
+		end
+	end)
 end
 
 local function schedule()
@@ -234,10 +293,11 @@ tern.on("cwd", function(_ev: CwdEvent, cx: WindowCx)
 	check_focused(cx)
 end)
 
--- Answers from the cache only: the formatter has a 4 ms budget, so the timer
+-- Answers from the caches only: the formatter has a 4 ms budget, so the timer
 -- and events above run `t3` and call `tern.chrome.refresh()` when it changes.
 tern.chrome.status(function(pane: StatusPaneInfo): { StatusSegment }?
-	local c = if pane.cwd then counts[pane.cwd] else nil
+	local project = if projects and pane.cwd then common.project_for(projects, pane.cwd) else nil
+	local c = if project then counts[project.id] else nil
 	if c == nil or (c.live == 0 and c.waiting == 0) then
 		return nil
 	end

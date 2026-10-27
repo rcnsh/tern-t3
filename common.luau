@@ -73,6 +73,57 @@ function M.json(result: ProcessResult): any
 	return if ok then data else nil
 end
 
+export type Project = { id: string, title: string, root: string }
+
+local PROJECTS_SQL = "select project_id as id, title, workspace_root as root from projection_projects "
+	.. "where deleted_at is null order by updated_at desc"
+
+-- T3 Code's projects, most recently used first. The CLI can add, remove and
+-- rename projects but not list them, so this reads T3 Code's state database
+-- read-only. `done(nil, why)` when it can't.
+function M.projects(done: ({ Project }?, string?, WindowCx?) -> ())
+	local db = t3_home() .. "/userdata/statev2.sqlite"
+	local argv = { "/usr/bin/sqlite3", "-readonly", "-json", db, PROJECTS_SQL }
+	local ok, err = pcall(function()
+		tern.process.run(argv, { timeout_ms = 5000 }, function(result: ProcessResult, cx: WindowCx?)
+			if result.status ~= 0 then
+				done(nil, M.why(result), cx)
+				return
+			end
+			-- sqlite3 prints nothing at all for an empty result.
+			local decoded, data = pcall(tern.json.decode, if result.stdout == "" then "[]" else result.stdout)
+			if not decoded or type(data) ~= "table" then
+				done(nil, "sqlite3 printed something other than a list of projects.", cx)
+				return
+			end
+			local projects: { Project } = {}
+			for _, row in data do
+				if type(row) == "table" and type(row.id) == "string" and type(row.root) == "string" then
+					table.insert(projects, { id = row.id, title = tostring(row.title or row.root), root = row.root })
+				end
+			end
+			done(projects, nil, cx)
+		end)
+	end)
+	if not ok then
+		done(nil, tostring(err), nil)
+	end
+end
+
+-- The project whose folder holds `path`, the deepest when they nest.
+function M.project_for(projects: { Project }, path: string): Project?
+	local best: Project? = nil
+	for _, p in projects do
+		local root = string.gsub(p.root, "/$", "")
+		if path == root or string.sub(path, 1, #root + 1) == root .. "/" then
+			if best == nil or #root > #best.root then
+				best = p
+			end
+		end
+	end
+	return best
+end
+
 -- Statuses of a thread whose agent is working.
 local LIVE = { queued = true, preparing = true, starting = true, running = true }
 
