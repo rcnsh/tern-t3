@@ -1,0 +1,20 @@
+schema = 1
+id = "t3"
+name = "T3 Code"
+version = "0.1.0"
+description = "T3 Code threads in Tern: start, read and message agent threads from your panes."
+icon = "sparkle"
+host = "host.luau"
+window = "window.luau"
+
+[[blocks]]
+id = "threads"
+title = "T3 Threads"
+# "Show T3 threads" opens it with the focused pane's directory.
+palette = false
+
+[[blocks]]
+id = "thread"
+title = "T3 Thread"
+# Opened from a thread list, a t3-thread:// link or "New T3 thread here".
+palette = false
