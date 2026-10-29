@@ -295,15 +295,18 @@ tern.command({ id = "send-output", title = "Send terminal output to a new T3 thr
 tern.command({ id = "threads", title = "Show T3 threads", icon = "list", run = show_threads })
 tern.command({ id = "app", title = "Open project in T3 Code", icon = "open", run = open_app })
 
--- `t3-thread://v1/<id>` links (T3 Code writes them in replies and `t3 thread
--- list` output) open a thread block; Cmd-click opens the thread in the app.
+-- `t3-thread://` links (T3 Code writes them in replies and `t3 thread list`
+-- output) open a thread block; Cmd-click opens the thread in the app. A
+-- thread in another environment opens in the app too: `t3` here only reads
+-- this machine's threads.
 tern.route.link(function(link: LinkRequest, _cx: WindowCx): RouteDecision?
-	local id = common.thread_id(link.url)
+	local id, env = common.thread_id(link.url)
 	if id == nil then
 		return nil
 	end
-	if link.mods.cmd then
-		local app = common.app_link(id)
+	local elsewhere = env ~= nil and env ~= common.local_env()
+	if link.mods.cmd or elsewhere then
+		local app = common.app_link(id, env)
 		if app then
 			return { url = app }
 		end
