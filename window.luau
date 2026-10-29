@@ -97,12 +97,71 @@ local function with_project(cx: WindowCx, cwd: string?, fn: (Project, WindowCx) 
 end
 
 ---------------------------------------------------------------------------
+-- Busy threads
+---------------------------------------------------------------------------
+
+-- Projects with an agent at work and those agents' thread ids, by project id,
+-- to notice an agent stopping. They live in `tern.kv` so they survive a reload
+-- and every window shares them: the window that sees a thread stop announces
+-- it and drops it, and every window checks these projects on each tick,
+-- whichever pane has focus.
+type Busy = { [string]: { project: Project, threads: { [string]: boolean } } }
+
+local BUSY = "busy"
+
+local function busy(): Busy
+	local ok, value = pcall(tern.kv.get, BUSY)
+	return if ok and type(value) == "table" then value else {}
+end
+
+-- Sets `project`'s busy threads; none drops the project.
+local function set_busy(project: Project, threads: { [string]: boolean }?)
+	local all = busy()
+	if threads and next(threads) then
+		all[project.id] = { project = project, threads = threads }
+	else
+		all[project.id] = nil
+	end
+	pcall(tern.kv.set, BUSY, all)
+end
+
+local function same(a: { [string]: boolean }, b: { [string]: boolean }): boolean
+	for k in a do
+		if not b[k] then
+			return false
+		end
+	end
+	for k in b do
+		if not a[k] then
+			return false
+		end
+	end
+	return true
+end
+
+-- Marks a thread started from here busy, so it is announced even when it
+-- stops before a tick sees it running.
+local function track(project: Project, id: string)
+	local entry = busy()[project.id]
+	local threads = if entry then entry.threads else {}
+	threads[id] = true
+	set_busy(project, threads)
+end
+
+---------------------------------------------------------------------------
 -- Commands
 ---------------------------------------------------------------------------
 
--- Starts a thread in `project` with `message` and opens it beside.
-local function start_thread(cx: WindowCx, project: Project, message: string)
-	local err = common.run({ "thread", "start", project.id, "-" }, message, function(result, cx2)
+-- Starts a thread in `project` with `message` and opens it beside. `flags`
+-- go before the project, such as `--worktree <ref>`.
+local function start_thread(cx: WindowCx, project: Project, message: string, flags: { string }?)
+	local args = { "thread", "start" }
+	for _, f in flags or ({} :: { string }) do
+		table.insert(args, f)
+	end
+	table.insert(args, project.id)
+	table.insert(args, "-")
+	local err = common.run(args, message, function(result, cx2)
 		if cx2 == nil then
 			return
 		end
@@ -111,6 +170,7 @@ local function start_thread(cx: WindowCx, project: Project, message: string)
 			return
 		end
 		local id = first_line(result.stdout)
+		track(project, id)
 		if cx2:new_block(THREAD, { id }, "beside") == nil then
 			cx2:toast("success", "Thread started in " .. project.title, id)
 		end
@@ -128,6 +188,40 @@ local function new_thread(cx: WindowCx)
 					start_thread(cx3, project, text)
 				end
 			end)
+	end)
+end
+
+-- Asks which branch, tag or commit to base a new worktree on (the project's
+-- current branch to start with), then for a message, and starts the thread
+-- in that worktree so the agent leaves the project folder alone.
+local function new_worktree_thread(cx: WindowCx)
+	with_project(cx, focused_cwd(cx), function(project, cx2)
+		cx2.git:repo(project.root):next(function(repo, err, cx3)
+			if cx3 == nil then
+				return
+			elseif repo == nil then
+				cx3:toast("error", project.title .. " isn't a git repository", err)
+				return
+			end
+			local branch = repo.branch or ""
+			cx3:prompt({ value = branch, placeholder = "Base the worktree on (branch, tag or commit)", icon = "sparkle", action = "next" })
+				:next(function(base, _err2, cx4)
+					local ref = if base then first_line(base) else ""
+					if cx4 == nil or ref == "" then
+						return
+					elseif string.sub(ref, 1, 1) == "-" then
+						-- t3 would read it as a flag.
+						cx4:toast("error", "Not a branch, tag or commit", ref)
+						return
+					end
+					cx4:prompt({ placeholder = "Message for a new thread on a worktree of " .. ref, icon = "sparkle", action = "start" })
+						:next(function(text, _err3, cx5)
+							if text and cx5 and string.find(text, "%S") then
+								start_thread(cx5, project, text, { "--worktree", ref })
+							end
+						end)
+				end)
+		end)
 	end)
 end
 
@@ -196,6 +290,7 @@ local function open_app(cx: WindowCx)
 end
 
 tern.command({ id = "new", title = "New T3 thread", icon = "sparkle", run = new_thread })
+tern.command({ id = "new-worktree", title = "New T3 thread in a worktree", icon = "sparkle", run = new_worktree_thread })
 tern.command({ id = "send-output", title = "Send terminal output to a new T3 thread", icon = "sparkle", run = send_output })
 tern.command({ id = "threads", title = "Show T3 threads", icon = "list", run = show_threads })
 tern.command({ id = "app", title = "Open project in T3 Code", icon = "open", run = open_app })
@@ -227,22 +322,55 @@ local counts: { [string]: Counts } = {}
 local fetching: { [string]: boolean } = {}
 local tick: TimerHandle? = nil
 
+-- Tells the user when an agent stops working: done, failed, or asking.
+local function announce(cx: WindowCx, project: Project, title: string, status: string)
+	if common.waiting(status) then
+		cx:toast("info", "T3 is waiting on you: " .. title, "Answer it in the T3 Code app.")
+	elseif common.tone(status) == "error" then
+		cx:toast("error", "T3 thread " .. status .. ": " .. title, project.title)
+	else
+		cx:toast("success", "T3 finished: " .. title, project.title)
+	end
+end
+
 local function fetch(project: Project)
 	if fetching[project.id] then
 		return
 	end
 	fetching[project.id] = true
-	local err = common.run({ "thread", "list", "--project", project.id, "--json" }, nil, function(result, _cx)
+	local err = common.run({ "thread", "list", "--project", project.id, "--json" }, nil, function(result, cx)
 		fetching[project.id] = nil
 		local data = common.json(result)
 		local c: Counts = { live = 0, waiting = 0 }
+		local entry = busy()[project.id]
+		local before = if entry then entry.threads else {}
+		local now: { [string]: boolean } = {}
 		for _, t in (if type(data) == "table" then data else {}) do
 			local status = if type(t) == "table" then tostring(t.status) else ""
+			local id = if type(t) == "table" and type(t.threadId) == "string" then t.threadId else nil
 			if common.live(status) then
 				c.live += 1
-			elseif common.waiting(status) then
-				c.waiting += 1
+				if id then
+					now[id] = true
+				end
+			else
+				if common.waiting(status) then
+					c.waiting += 1
+				end
+				if id and before[id] then
+					if cx then
+						announce(cx, project, tostring(t.title or "Untitled"), status)
+					else
+						-- Announce it on a later run that has a window to toast in.
+						now[id] = true
+					end
+				end
 			end
+		end
+		-- Write only on a change. A thread that left the list (deleted, or
+		-- its project gone) drops out too.
+		if type(data) == "table" and not same(before, now) then
+			set_busy(project, now)
 		end
 		counts[project.id] = c
 		tern.chrome.refresh()
@@ -275,9 +403,16 @@ local function schedule()
 		if cx then
 			check_focused(cx)
 		end
+		for _, b in busy() do
+			fetch(b.project)
+		end
 		schedule()
 	end)
 end
+
+-- Tern can reload this half without a window_start (when it reloads its
+-- settings, for one), so start ticking now.
+schedule()
 
 tern.on("window_start", function(cx: WindowCx)
 	check_focused(cx)

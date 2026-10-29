@@ -15,9 +15,10 @@ in native Tern blocks, without leaving the terminal.
 
 - **Thread list.** Every thread in the project with its status, PR count and age, live while agents work.
 - **Thread view.** Title, status, model, branch and PRs, the latest 30 messages (older ones folded to a line) and a message box to reply.
-- **Start from the terminal.** Open a new thread in the focused pane's project, or send it your terminal output with an instruction such as "Why did this fail? Fix it."
+- **Start from the terminal.** Open a new thread in the focused pane's project, optionally in its own git worktree, or send it your terminal output with an instruction such as "Why did this fail? Fix it."
 - **Links.** `t3-thread://` links open in Tern; ⌘-click opens them in the T3 Code app.
 - **Status line.** `T3 2 running · 1 waiting` for the project you're in. Click it for the thread list.
+- **Notifications.** A toast when an agent finishes, fails or starts waiting on you, in any project where one was running.
 - **Works anywhere.** Outside a project folder, it asks which project you mean.
 
 <p align="center">
@@ -48,6 +49,7 @@ Open Tern's command palette and type `T3`:
 | Command | What it does |
 | --- | --- |
 | **New T3 thread** | Asks for a message, starts a thread and opens it beside the pane. |
+| **New T3 thread in a worktree** | Asks which branch, tag or commit to base it on (the current branch to start with), then for a message, and starts the thread in a new git worktree. |
 | **Send terminal output to a new T3 thread** | Asks what you want done, then starts a thread with that, the last command, its exit status and the pane's last 120 lines. |
 | **Show T3 threads** | Opens the project's thread list. |
 | **Open project in T3 Code** | Opens the project in the desktop app. |
@@ -74,13 +76,15 @@ T3 Code has no plugin system, so this is a Tern plugin that drives T3 Code's `t3
 | File | Runs in | Holds |
 | --- | --- | --- |
 | [`host.luau`](host.luau) | Tern's session daemon | The thread list and thread blocks. They refresh every 3 s while an agent works, 15 s otherwise. |
-| [`window.luau`](window.luau) | Each Tern window | Palette commands, the `t3-thread://` link route and the status line. |
+| [`window.luau`](window.luau) | Each Tern window | Palette commands, the `t3-thread://` link route, the status line and notifications. |
 | [`common.luau`](common.luau) | Both | Running `t3`, thread statuses, links and the project list. |
 
 - Threads come from `t3 thread list|show|start|send`; the app opens with `t3 app` or a `t3code://threads/<environment>/<thread>` link.
 - The CLI can't list projects, so the picker reads them read-only from T3 Code's state database
   (`~/.t3/userdata/statev2.sqlite`) with `/usr/bin/sqlite3`. A T3 Code update that changes that schema would break the picker.
 - The status line runs `t3` only for folders inside a project.
+- Notifications track running threads in the plugin's `kv.json`, shared by every window, and check their projects every 15 s
+  whichever pane has focus. A thread that starts and stops between checks is announced only when it was started from Tern.
 
 ## Limits
 
