@@ -164,29 +164,45 @@ function M.icon(status: string): string
 	return "message"
 end
 
--- The link T3 Code writes for a thread (`t3-thread://v1/<id>`); this
--- plugin routes it to a thread block.
+-- A link to a thread on this machine that this plugin routes to a thread
+-- block. T3 Code writes `v2` links (below); `v1` is what it wrote before.
 function M.thread_link(id: string): string
 	return "t3-thread://v1/" .. id
 end
 
--- The thread id in a `t3-thread://` link, or nil.
-function M.thread_id(url: string): string?
-	return string.match(url, "^t3%-thread://v1/([%w%-]+)/?$")
+local function unescape(s: string): string
+	return (string.gsub(s, "%%(%x%x)", function(hex)
+		return string.char(tonumber(hex, 16) :: number)
+	end))
 end
 
--- The desktop app's deep link to a thread: `t3code://threads/<env>/<id>`.
--- Nil when this machine has no local environment id.
-function M.app_link(id: string): string?
+-- The thread id in a `t3-thread://` link, and for a `v2` link
+-- (`t3-thread://v2/<environment>/<id>`) the environment it lives in; nil when
+-- it isn't a thread link. Ids can hold `:`, as in `mcp:<uuid>`.
+function M.thread_id(url: string): (string?, string?)
+	local env, id = string.match(url, "^t3%-thread://v2/([^/]+)/([^/]+)/?$")
+	if env and id then
+		return unescape(id), unescape(env)
+	end
+	local v1 = string.match(url, "^t3%-thread://v1/([^/]+)/?$")
+	return if v1 then unescape(v1) else nil, nil
+end
+
+-- This machine's T3 Code environment id, or nil.
+function M.local_env(): string?
 	local ok, env = pcall(tern.fs.read, t3_home() .. "/userdata/environment-id", 256)
 	if not ok then
 		return nil
 	end
 	local trimmed = string.match(env, "^%s*(.-)%s*$")
-	if trimmed == nil or trimmed == "" then
-		return nil
-	end
-	return "t3code://threads/" .. trimmed .. "/" .. id
+	return if trimmed == nil or trimmed == "" then nil else trimmed
+end
+
+-- The desktop app's deep link to a thread: `t3code://threads/<env>/<id>`,
+-- in `env` or else this machine's environment. Nil when neither is known.
+function M.app_link(id: string, env: string?): string?
+	local e = env or M.local_env()
+	return if e then "t3code://threads/" .. e .. "/" .. id else nil
 end
 
 -- Seconds since the epoch of an ISO 8601 UTC time (`2026-10-27T18:04:12.336Z`),
