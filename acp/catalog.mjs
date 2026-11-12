@@ -30,11 +30,16 @@ let cached = { at: 0, home: "", list: [] };
 export function projects(t3Home, { fresh = false } = {}) {
   if (!fresh && cached.home === t3Home && Date.now() - cached.at < PROJECTS_TTL_MS) return cached.list;
   const read = readProjects(t3Home);
-  // A failed read (the database busy) keeps the last good list, and isn't
-  // retried until the cache would expire, since each try can block for 5 s.
-  const list = read ?? (cached.home === t3Home ? cached.list : []);
-  cached = { at: Date.now(), home: t3Home, list };
-  return list;
+  if (read) {
+    cached = { at: Date.now(), home: t3Home, list: read };
+    return read;
+  }
+  // The database couldn't be read (busy, say): keep serving the last good
+  // list for another spell, since each try can block for 5 s. With no good
+  // list yet there is nothing to keep, so the next call tries again.
+  if (cached.home !== t3Home) return [];
+  cached.at = Date.now();
+  return cached.list;
 }
 
 // The projects, or null when the database can't be read.
