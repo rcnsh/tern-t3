@@ -8,6 +8,9 @@ A Tern plugin that drives T3 Code's `t3` CLI. The README's "How it works" covers
 The typecheck in the README is the only automated check; it must come back with no errors. Run `tern plugin types .`
 again after a Tern update so `tern.d.luau` matches the running Tern.
 
+`acp/t3-acp.mjs` is plain Node with no dependencies and no typecheck. `node acp/smoke.mjs acp/t3-acp.mjs <project-dir>`
+drives it over stdio the way Tern does; it starts a real T3 thread, so archive the thread afterwards.
+
 Prove behaviour in a real Tern window as well: the typecheck can't tell whether a toast shows or a link routes.
 
 ## Testing in a control window
@@ -49,12 +52,29 @@ its next reload. Work on a second change in a separate `git worktree`, and link 
 - **Icons:** use icon names the plugin already uses (`sparkle`, `list`, `open`, `folder`, …). Tern doesn't list valid
   names, and a guessed one may not render.
 
+## The ACP agent
+
+- Tern finds custom agents in `settings.json` under `agents.custom` (`id`, `name`, `command`, `args`, `env`); ids
+  `claude`, `codex` and `copilot` are taken. `tern acp <id>` opens one in a chat; `tern ctl … prefs agents` shows the picker.
+- A new chat has no thread until its first message, so the agent hands Tern a `t3-new-<uuid>` session id and records
+  which thread it became in `~/.local/state/tern-t3/acp-sessions.json`. Other session ids are T3 thread ids.
+- Tern's chat shows two config option categories as chips under the message box: `model`, and `mode` (which ⇧Tab
+  cycles). Any other category is listed only under `/config`, so the project option uses `mode`. Tern hides the chip
+  when it has one choice, and moves it before the agent answers `session/set_config_option`: a refusal has to send
+  `config_option_update` with the real values to move it back.
+- `t3 thread send` can't change a thread's model or project, so both are fixed once the first message starts the thread.
+- ACP message shapes: the JSON schema in the `@agentclientprotocol/sdk` package (`schema/v1/schema.json`), which Tern
+  installs under `~/Library/Application Support/Tern/agents/claude/node_modules`.
+
 ## `t3` CLI behaviour
 
 - `t3 thread list --project <id>` with an unknown id falls back to the current directory's project instead of failing.
 - Thread ids can contain `:` (`mcp:<uuid>`). Links come as `t3-thread://v2/<environment>/<id>`, or
   `t3-thread://v1/<id>` from older builds.
 - `t3 <command> --help` is the reference for flags.
+- `t3 thread show` lists finished messages only, each tagged with its `runId`; `thread start|send --json` return the
+  `runId` of the run they began. A thread reads `waiting` for a moment after a reply even with nothing pending: only
+  `pendingRequestCount > 0` means it waits on the user.
 - To keep a test thread running across the 15 s status tick, ask its agent for several short foreground commands
   (`sleep 8` six times). A single long `sleep` is often backgrounded, and the turn ends at once.
 
