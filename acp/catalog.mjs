@@ -26,13 +26,16 @@ const PROJECTS_TTL_MS = 5000;
 let cached = { at: 0, home: "", list: [] };
 
 /** @returns {{id: string, title: string, root: string, model: string | null}[]} newest first */
-export function projects(t3Home) {
-  if (cached.home === t3Home && Date.now() - cached.at < PROJECTS_TTL_MS) return cached.list;
+// `fresh` skips the cache, for checking a project picked moments ago.
+export function projects(t3Home, { fresh = false } = {}) {
+  if (!fresh && cached.home === t3Home && Date.now() - cached.at < PROJECTS_TTL_MS) return cached.list;
   const list = readProjects(t3Home);
-  cached = { at: Date.now(), home: t3Home, list };
-  return list;
+  // A failed read (the database busy) isn't kept, so the next call retries.
+  if (list) cached = { at: Date.now(), home: t3Home, list };
+  return list ?? [];
 }
 
+// The projects, or null when the database can't be read.
 function readProjects(t3Home) {
   try {
     const out = execFileSync(
@@ -41,7 +44,7 @@ function readProjects(t3Home) {
       { encoding: "utf8", timeout: 5000 },
     );
     const rows = JSON.parse(out || "[]");
-    if (!Array.isArray(rows)) return [];
+    if (!Array.isArray(rows)) return null;
     return rows
       .filter((r) => r.id && r.root)
       .map((r) => {
@@ -52,7 +55,7 @@ function readProjects(t3Home) {
         return { ...r, model: sel?.instanceId && sel?.model ? `${sel.instanceId}/${sel.model}` : null };
       });
   } catch {
-    return [];
+    return null;
   }
 }
 

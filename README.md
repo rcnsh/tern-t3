@@ -124,8 +124,8 @@ T3 Code has no plugin system, so this is a Tern plugin that drives T3 Code's `t3
 - **Polling, not streaming.** Tern plugins can only run a process to completion and can't open a WebSocket, so views refresh on a timer.
 - **The agent chat shows whole messages.** `t3 thread show` reports finished messages only, so a reply appears a message
   at a time (polled every second), with no tool calls or thinking.
-- **Opening a running thread.** Opening a thread from Tern's session list shows its finished messages; replies from a
-  run still going show up after your next message.
+- **Opening a running thread.** Opening a thread from Tern's session list shows the messages finished so far; the rest of
+  a run that is still going shows only in T3 Code.
 - **Stopping.** Esc in the agent chat stops following the turn, but the `t3` CLI can't interrupt a run, so it carries on
   in T3 Code.
 - **Agent questions.** When an agent asks you something (`waiting`), answer it in the T3 Code app. The agent chat says so

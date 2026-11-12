@@ -61,7 +61,12 @@ function t3Candidates() {
   return ["t3", join(T3_HOME, "bin", "t3"), "/opt/homebrew/bin/t3", "/usr/local/bin/t3"];
 }
 
-class T3Error extends Error {}
+class T3Error extends Error {
+  constructor(message, { timedOut = false } = {}) {
+    super(message);
+    this.timedOut = timedOut;
+  }
+}
 
 function runOnce(bin, args, { cwd, stdin, timeout = T3_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
@@ -76,7 +81,7 @@ function runOnce(bin, args, { cwd, stdin, timeout = T3_TIMEOUT_MS }) {
         }
         if (err) {
           const why = (stderr || stdout || "").trim().split("\n").slice(0, 4).join("\n");
-          reject(new T3Error(why || (err.killed ? `t3 did not answer within ${timeout / 1000} seconds.` : err.message)));
+          reject(new T3Error(why || (err.killed ? `t3 did not answer within ${timeout / 1000} seconds.` : err.message), { timedOut: !!err.killed }));
           return;
         }
         resolve(stdout);
@@ -197,6 +202,25 @@ function newSession(cwd, threadId) {
   return { cwd, threadId, turn: null, project: project?.id ?? null, model: null, fixed: null };
 }
 
+const CANCELLED = Symbol("cancelled");
+
+// Records the thread `t3 thread start` made for a session, with the project
+// and model it actually runs on: T3 may pick a model other than the chip's
+// default (a project default, a usage-limit fallback).
+async function adopt(sessionId, s, started) {
+  s.threadId = started.threadId;
+  remember(sessionId, started.threadId, s.cwd);
+  s.fixed = { projectId: started.projectId || s.project, model: s.model };
+  try {
+    fix(s, (await t3Json(["thread", "show", started.threadId, "--messages", "0"], { cwd: workdir(s) })).thread || {});
+  } catch (err) {
+    log("show after start failed:", err.message);
+  }
+  update(sessionId, { sessionUpdate: "config_option_update", configOptions: configOptions(s) });
+  const link = appLink(started.threadId);
+  if (link) log("started", started.threadId, link);
+}
+
 // Fills in a started session's project and model from its thread.
 function fix(s, thread) {
   s.fixed = {
@@ -211,6 +235,12 @@ function workdir(s) {
   if (existsSync(s.cwd)) return s.cwd;
   const id = s.fixed?.projectId || s.project;
   return catalog.projects(T3_HOME).find((p) => p.id === id)?.root || s.cwd;
+}
+
+// Where to run `t3 thread show` for a thread whose project isn't known yet:
+// show takes a thread id, so any folder does once the chat's is gone.
+function showDir(cwd) {
+  return existsSync(cwd) ? cwd : HOME;
 }
 
 // Starts the session's thread with `text`. In the chat's own folder when it
@@ -339,7 +369,7 @@ function promptText(blocks) {
       parts.push(`@${where(b.uri)}`);
     } else if (b.type === "resource" && b.resource) {
       const r = b.resource;
-      if (typeof r.text === "string") parts.push(`${where(r.uri)}:\n\`\`\`\n${r.text}\n\`\`\``);
+      if (typeof r.text === "string") parts.push(`${r.uri ? `${where(r.uri)}:\n` : ""}\`\`\`\n${r.text}\n\`\`\``);
       else if (r.uri) parts.push(`@${where(r.uri)}`);
     }
   }
@@ -363,18 +393,18 @@ async function follow(sessionId, s, threadId, runId, turn) {
   // window reaches back to the run's own prompt; when it doesn't, read more.
   let sent = 0;
   let window = POLL_MESSAGES;
-  let failingSince = null;
+  let answeredAt = Date.now();
   for (;;) {
     if (turn.cancelled) return "cancelled";
     let data;
     try {
       data = await t3Json(["thread", "show", threadId, "--messages", String(sent + window)], { cwd: workdir(s) });
-      failingSince = null;
+      answeredAt = Date.now();
     } catch (err) {
       log("show failed:", err.message);
-      failingSince ??= Date.now();
-      if (Date.now() - failingSince > FOLLOW_GIVE_UP_MS) {
-        say(sessionId, `\n\nStopped following: T3 Code hasn't answered for a minute (${err.message}).`);
+      const quiet = Date.now() - answeredAt;
+      if (quiet > FOLLOW_GIVE_UP_MS) {
+        say(sessionId, `\n\nStopped following: T3 Code hasn't answered for ${Math.round(quiet / 1000)} s (${err.message}).`);
         return "end_turn";
       }
       await sleep(POLL_MS);
@@ -444,7 +474,7 @@ const handlers = {
     sessions.set(params.sessionId, s);
     if (threadId) {
       try {
-        fix(s, (await t3Json(["thread", "show", threadId, "--messages", "0"], { cwd: workdir(s) })).thread || {});
+        fix(s, (await t3Json(["thread", "show", threadId, "--messages", "0"], { cwd: showDir(params.cwd) })).thread || {});
       } catch (err) {
         log("resume: show failed:", err.message);
         s.fixed = { projectId: null, model: null };
@@ -463,7 +493,7 @@ const handlers = {
       throw new RpcError(-32602, "The project and model are set when the thread starts; open a new chat to change them.");
     }
     if (params.configId === "project") {
-      if (!catalog.projects(T3_HOME).some((p) => p.id === value)) throw new RpcError(-32602, `No T3 Code project ${value}`);
+      if (!catalog.projects(T3_HOME, { fresh: true }).some((p) => p.id === value)) throw new RpcError(-32602, `No T3 Code project ${value}`);
       s.project = value;
     } else if (params.configId === "model") {
       if (value !== DEFAULT && !catalog.splitModel(value)) throw new RpcError(-32602, `No model ${value}`);
@@ -482,7 +512,7 @@ const handlers = {
     if (!threadId) return { configOptions: configOptions(s) };
     let data;
     try {
-      data = await t3Json(["thread", "show", threadId, "--messages", String(REPLAY_MESSAGES)], { cwd: workdir(s) });
+      data = await t3Json(["thread", "show", threadId, "--messages", String(REPLAY_MESSAGES)], { cwd: showDir(cwd) });
     } catch (err) {
       throw new RpcError(-32002, `Couldn't load T3 thread ${threadId}: ${err.message}`);
     }
@@ -523,7 +553,10 @@ const handlers = {
 
   async "session/close"(params) {
     const s = sessions.get(params.sessionId);
-    if (s?.turn) s.turn.cancelled = true;
+    if (s?.turn) {
+      s.turn.cancelled = true;
+      s.turn.cancel();
+    }
     sessions.delete(params.sessionId);
     return {};
   },
@@ -542,38 +575,41 @@ const handlers = {
     const text = promptText(params.prompt);
     if (!text) return { stopReason: "end_turn" };
 
-    const turn = { cancelled: false };
+    let onCancel;
+    const turn = { cancelled: false, whenCancelled: new Promise((r) => (onCancel = r)), cancel: () => onCancel(CANCELLED) };
     s.turn = turn;
     try {
       let threadId = s.threadId;
       let runId;
       try {
-        if (!threadId) {
-          const started = await startThread(s, text);
-          threadId = started.threadId;
-          runId = started.runId;
-          s.threadId = threadId;
-          remember(sessionId, threadId, s.cwd);
-          // The thread's own project and model: T3 may pick a model other than
-          // the chip's default (a project default, a usage-limit fallback).
-          s.fixed = { projectId: started.projectId || s.project, model: s.model };
-          try {
-            fix(s, (await t3Json(["thread", "show", threadId, "--messages", "0"], { cwd: workdir(s) })).thread || {});
-          } catch (err) {
-            log("show after start failed:", err.message);
-          }
-          update(sessionId, { sessionUpdate: "config_option_update", configOptions: configOptions(s) });
-          const link = appLink(threadId);
-          if (link) log("started", threadId, link);
-        } else {
-          const sent = await t3Json(["thread", "send", threadId, "-"], { cwd: workdir(s), stdin: text, timeout: T3_START_TIMEOUT_MS });
-          runId = sent.runId;
+        // A start Tern stopped waiting for may still be on its way.
+        if (!threadId && s.starting) {
+          await s.starting.catch(() => {});
+          threadId = s.threadId;
         }
+        // Delivery carries on if Tern cancels: a start still records its
+        // thread when it lands, so the next message goes to it.
+        const delivery = threadId
+          ? t3Json(["thread", "send", threadId, "-"], { cwd: workdir(s), stdin: text, timeout: T3_START_TIMEOUT_MS })
+          : (s.starting = startThread(s, text)
+              .then((started) => {
+                adopt(sessionId, s, started);
+                return started;
+              })
+              .finally(() => {
+                s.starting = null;
+              }));
+        delivery.catch(() => {});
+        const result = await Promise.race([delivery, turn.whenCancelled]);
+        if (result === CANCELLED) return { stopReason: "cancelled" };
+        threadId = s.threadId;
+        runId = result.runId;
       } catch (err) {
         // ACP wants `cancelled` after a cancel, whatever else went wrong.
         if (turn.cancelled) return { stopReason: "cancelled" };
         if (err instanceof T3Error) {
-          say(sessionId, `T3 Code couldn't take that message: ${err.message}`);
+          const maybe = err.timedOut ? " It may still have gone through, so check T3 Code before sending it again." : "";
+          say(sessionId, `T3 Code couldn't take that message: ${err.message}${maybe}`);
           return { stopReason: "end_turn" };
         }
         throw err;
@@ -593,7 +629,10 @@ const handlers = {
 const notifications = {
   "session/cancel"(params) {
     const s = sessions.get(params?.sessionId);
-    if (s?.turn) s.turn.cancelled = true;
+    if (s?.turn) {
+      s.turn.cancelled = true;
+      s.turn.cancel();
+    }
   },
 };
 
