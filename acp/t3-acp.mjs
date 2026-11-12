@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import * as catalog from "./catalog.mjs";
 
@@ -22,13 +23,16 @@ const VERSION = "0.1.0";
 const PROTOCOL_VERSION = 1;
 const POLL_MS = 1000;
 const T3_TIMEOUT_MS = 30_000;
+// `thread start|send` wait for T3 to set the run up; give up on them later so a
+// slow start isn't killed after T3 has made the thread.
+const T3_START_TIMEOUT_MS = 180_000;
+// How long `thread show` may keep failing before a turn gives up following.
+const FOLLOW_GIVE_UP_MS = 60_000;
 // How many messages past those already shown one poll reads; `follow` reads
 // more when a run outgrows it.
 const POLL_MESSAGES = 60;
 const REPLAY_MESSAGES = 200;
 
-// Statuses of a thread whose agent is at work, as T3 Code reports them.
-const LIVE = new Set(["queued", "preparing", "starting", "running"]);
 const ENDED = new Set(["completed", "failed", "interrupted", "cancelled"]);
 
 const HOME = homedir();
@@ -59,12 +63,12 @@ function t3Candidates() {
 
 class T3Error extends Error {}
 
-function runOnce(bin, args, { cwd, stdin }) {
+function runOnce(bin, args, { cwd, stdin, timeout = T3_TIMEOUT_MS }) {
   return new Promise((resolve, reject) => {
     const child = execFile(
       bin,
       args,
-      { cwd, timeout: T3_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, NO_COLOR: "1" } },
+      { cwd, timeout, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, NO_COLOR: "1" } },
       (err, stdout, stderr) => {
         if (err && err.code === "ENOENT") {
           reject(err);
@@ -72,7 +76,7 @@ function runOnce(bin, args, { cwd, stdin }) {
         }
         if (err) {
           const why = (stderr || stdout || "").trim().split("\n").slice(0, 4).join("\n");
-          reject(new T3Error(why || (err.killed ? "t3 did not answer within 30 seconds." : err.message)));
+          reject(new T3Error(why || (err.killed ? `t3 did not answer within ${timeout / 1000} seconds.` : err.message)));
           return;
         }
         resolve(stdout);
@@ -222,7 +226,7 @@ async function startThread(s, text) {
   const args = ["thread", "start", target, "-"];
   const model = s.model && catalog.splitModel(s.model);
   if (model) args.push("--provider", model.instance, "--model", model.slug);
-  return t3Json(args, { cwd: target === s.cwd ? s.cwd : picked.root, stdin: text });
+  return t3Json(args, { cwd: target === s.cwd ? s.cwd : picked.root, stdin: text, timeout: T3_START_TIMEOUT_MS });
 }
 
 // ---------------------------------------------------------------------------
@@ -315,19 +319,28 @@ function session(sessionId) {
   return s;
 }
 
+// A resource's place as T3 should read it: a path for file: URIs.
+function where(uri) {
+  if (typeof uri !== "string") return "";
+  try {
+    return uri.startsWith("file:") ? fileURLToPath(uri) : uri;
+  } catch {
+    return uri;
+  }
+}
+
 // A prompt's content blocks as one message for T3.
 function promptText(blocks) {
   const parts = [];
   for (const b of blocks || []) {
     if (b.type === "text") {
       parts.push(b.text);
-    } else if (b.type === "resource_link") {
-      parts.push(`@${b.uri.replace(/^file:\/\//, "")}`);
+    } else if (b.type === "resource_link" && b.uri) {
+      parts.push(`@${where(b.uri)}`);
     } else if (b.type === "resource" && b.resource) {
       const r = b.resource;
-      const where = (r.uri || "").replace(/^file:\/\//, "");
-      if (typeof r.text === "string") parts.push(`${where}:\n\`\`\`\n${r.text}\n\`\`\``);
-      else parts.push(`@${where}`);
+      if (typeof r.text === "string") parts.push(`${where(r.uri)}:\n\`\`\`\n${r.text}\n\`\`\``);
+      else if (r.uri) parts.push(`@${where(r.uri)}`);
     }
   }
   return parts.join("\n\n").trim();
@@ -350,13 +363,20 @@ async function follow(sessionId, s, threadId, runId, turn) {
   // window reaches back to the run's own prompt; when it doesn't, read more.
   let sent = 0;
   let window = POLL_MESSAGES;
+  let failingSince = null;
   for (;;) {
     if (turn.cancelled) return "cancelled";
     let data;
     try {
       data = await t3Json(["thread", "show", threadId, "--messages", String(sent + window)], { cwd: workdir(s) });
+      failingSince = null;
     } catch (err) {
       log("show failed:", err.message);
+      failingSince ??= Date.now();
+      if (Date.now() - failingSince > FOLLOW_GIVE_UP_MS) {
+        say(sessionId, `\n\nStopped following: T3 Code hasn't answered for a minute (${err.message}).`);
+        return "end_turn";
+      }
       await sleep(POLL_MS);
       continue;
     }
@@ -424,7 +444,7 @@ const handlers = {
     sessions.set(params.sessionId, s);
     if (threadId) {
       try {
-        fix(s, (await t3Json(["thread", "show", threadId, "--messages", "0"], { cwd: params.cwd })).thread || {});
+        fix(s, (await t3Json(["thread", "show", threadId, "--messages", "0"], { cwd: workdir(s) })).thread || {});
       } catch (err) {
         log("resume: show failed:", err.message);
         s.fixed = { projectId: null, model: null };
@@ -462,7 +482,7 @@ const handlers = {
     if (!threadId) return { configOptions: configOptions(s) };
     let data;
     try {
-      data = await t3Json(["thread", "show", threadId, "--messages", String(REPLAY_MESSAGES)], { cwd });
+      data = await t3Json(["thread", "show", threadId, "--messages", String(REPLAY_MESSAGES)], { cwd: workdir(s) });
     } catch (err) {
       throw new RpcError(-32002, `Couldn't load T3 thread ${threadId}: ${err.message}`);
     }
@@ -546,7 +566,7 @@ const handlers = {
           const link = appLink(threadId);
           if (link) log("started", threadId, link);
         } else {
-          const sent = await t3Json(["thread", "send", threadId, "-"], { cwd: workdir(s), stdin: text });
+          const sent = await t3Json(["thread", "send", threadId, "-"], { cwd: workdir(s), stdin: text, timeout: T3_START_TIMEOUT_MS });
           runId = sent.runId;
         }
       } catch (err) {

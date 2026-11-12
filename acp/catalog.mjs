@@ -20,8 +20,20 @@ function readJson(file) {
   }
 }
 
+// Reads within a few seconds of each other share one sqlite3 run: one request
+// asks several times, and a turn polls every second.
+const PROJECTS_TTL_MS = 5000;
+let cached = { at: 0, home: "", list: [] };
+
 /** @returns {{id: string, title: string, root: string, model: string | null}[]} newest first */
 export function projects(t3Home) {
+  if (cached.home === t3Home && Date.now() - cached.at < PROJECTS_TTL_MS) return cached.list;
+  const list = readProjects(t3Home);
+  cached = { at: Date.now(), home: t3Home, list };
+  return list;
+}
+
+function readProjects(t3Home) {
   try {
     const out = execFileSync(
       "/usr/bin/sqlite3",

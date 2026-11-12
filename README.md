@@ -113,8 +113,8 @@ T3 Code has no plugin system, so this is a Tern plugin that drives T3 Code's `t3
 - The CLI can't list projects, so the picker reads them read-only from T3 Code's state database
   (`~/.t3/userdata/statev2.sqlite`) with `/usr/bin/sqlite3`. A T3 Code update that changes that schema would break the picker.
 - The agent chat's model list comes from T3 Code's `model-manifest.json` (current models per provider), the enabled
-  providers and their custom models in its `settings.json`, and your favourites in `client-settings.json`, all under
-  `~/.t3/userdata`, read-only. Its project list comes from the same state database as the picker.
+  providers, their custom models and your favourites in its `settings.json` (favourites fall back to
+  `client-settings.json` while unset), all under `~/.t3/userdata`, read-only. Its project list comes from the same state database as the picker.
 - The status line runs `t3` only for folders inside a project.
 - Notifications track running threads in the plugin's `kv.json`, shared by every window, and check their projects every 15 s
   whichever pane has focus. A thread that starts and stops between checks is announced only when it was started from Tern.
@@ -124,6 +124,8 @@ T3 Code has no plugin system, so this is a Tern plugin that drives T3 Code's `t3
 - **Polling, not streaming.** Tern plugins can only run a process to completion and can't open a WebSocket, so views refresh on a timer.
 - **The agent chat shows whole messages.** `t3 thread show` reports finished messages only, so a reply appears a message
   at a time (polled every second), with no tool calls or thinking.
+- **Opening a running thread.** Opening a thread from Tern's session list shows its finished messages; replies from a
+  run still going show up after your next message.
 - **Stopping.** Esc in the agent chat stops following the turn, but the `t3` CLI can't interrupt a run, so it carries on
   in T3 Code.
 - **Agent questions.** When an agent asks you something (`waiting`), answer it in the T3 Code app. The agent chat says so
