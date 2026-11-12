@@ -29,10 +29,12 @@ let cached = { at: 0, home: "", list: [] };
 // `fresh` skips the cache, for checking a project picked moments ago.
 export function projects(t3Home, { fresh = false } = {}) {
   if (!fresh && cached.home === t3Home && Date.now() - cached.at < PROJECTS_TTL_MS) return cached.list;
-  const list = readProjects(t3Home);
-  // A failed read (the database busy) isn't kept, so the next call retries.
-  if (list) cached = { at: Date.now(), home: t3Home, list };
-  return list ?? [];
+  const read = readProjects(t3Home);
+  // A failed read (the database busy) keeps the last good list, and isn't
+  // retried until the cache would expire, since each try can block for 5 s.
+  const list = read ?? (cached.home === t3Home ? cached.list : []);
+  cached = { at: Date.now(), home: t3Home, list };
+  return list;
 }
 
 // The projects, or null when the database can't be read.

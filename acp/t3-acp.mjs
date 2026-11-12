@@ -185,14 +185,41 @@ function forget(sessionId) {
  * A chat session. Before its thread starts, `project` and `model` hold what
  * the user picked (`model` null: T3 Code's default); once it has started,
  * `fixed` holds the thread's own project and model, which the CLI can't change.
+ * @typedef {{cancelled: boolean, whenCancelled: Promise<symbol>, cancel: () => void}} Turn
  * @typedef {{
- *   cwd: string, threadId: string | null, turn: {cancelled: boolean} | null,
+ *   cwd: string, threadId: string | null, turn: Turn | null,
  *   project: string | null, model: string | null,
  *   fixed: {projectId: string | null, model: string | null} | null,
  * }} Session
  * @type {Map<string, Session>}
  */
 const sessions = new Map();
+
+// First-message starts still on their way, by session id. One outlives the
+// turn that began it (Esc stops the waiting, not the start) and the Session
+// object (a chat closed and resumed meanwhile), so the next message waits for
+// it rather than starting a second thread.
+/** @type {Map<string, Promise<unknown>>} */
+const starting = new Map();
+// Why a start that nobody was waiting for failed, by session id, for the next
+// message to report.
+/** @type {Map<string, T3Error>} */
+const startFailures = new Map();
+// Sessions deleted while their start was on its way, so it isn't recorded.
+const deleted = new Set();
+
+function newTurn() {
+  let wake;
+  const turn = {
+    cancelled: false,
+    whenCancelled: new Promise((r) => (wake = r)),
+    cancel() {
+      turn.cancelled = true;
+      wake(CANCELLED);
+    },
+  };
+  return turn;
+}
 
 function newSession(cwd, threadId) {
   // The folder's project, else the most recent one, which the chat shows so it
@@ -207,18 +234,46 @@ const CANCELLED = Symbol("cancelled");
 // Records the thread `t3 thread start` made for a session, with the project
 // and model it actually runs on: T3 may pick a model other than the chip's
 // default (a project default, a usage-limit fallback).
-async function adopt(sessionId, s, started) {
+async function adopt(sessionId, picked, started) {
+  if (deleted.has(sessionId)) return;
+  remember(sessionId, started.threadId, picked.cwd);
+  // The session as it is now: it may have been closed and resumed meanwhile.
+  const s = sessions.get(sessionId) || picked;
   s.threadId = started.threadId;
-  remember(sessionId, started.threadId, s.cwd);
-  s.fixed = { projectId: started.projectId || s.project, model: s.model };
+  s.fixed = { projectId: started.projectId || picked.project, model: picked.model };
   try {
     fix(s, (await t3Json(["thread", "show", started.threadId, "--messages", "0"], { cwd: workdir(s) })).thread || {});
   } catch (err) {
     log("show after start failed:", err.message);
   }
-  update(sessionId, { sessionUpdate: "config_option_update", configOptions: configOptions(s) });
+  if (sessions.get(sessionId) === s) {
+    update(sessionId, { sessionUpdate: "config_option_update", configOptions: configOptions(s) });
+  }
   const link = appLink(started.threadId);
   if (link) log("started", started.threadId, link);
+}
+
+// Starts a session's thread in the background of its turn; see `starting`.
+function beginStart(sessionId, s, text) {
+  const p = startThread(s, text)
+    .then(async (started) => {
+      try {
+        await adopt(sessionId, s, started);
+      } catch (err) {
+        log("recording the new thread failed:", err.message);
+      }
+      return started;
+    })
+    .catch((err) => {
+      if (err instanceof T3Error) startFailures.set(sessionId, err);
+      throw err;
+    })
+    .finally(() => {
+      if (starting.get(sessionId) === p) starting.delete(sessionId);
+    });
+  p.catch(() => {});
+  starting.set(sessionId, p);
+  return p;
 }
 
 // Fills in a started session's project and model from its thread.
@@ -487,7 +542,7 @@ const handlers = {
     const s = session(params.sessionId);
     const value = String(params.value);
     // The first message's `t3 thread start` has read the picks already.
-    if (s.fixed || s.turn) {
+    if (s.fixed || s.turn || starting.has(params.sessionId)) {
       // Tern moves the chip before it hears back, so put it back first.
       update(params.sessionId, { sessionUpdate: "config_option_update", configOptions: configOptions(s) });
       throw new RpcError(-32602, "The project and model are set when the thread starts; open a new chat to change them.");
@@ -552,17 +607,15 @@ const handlers = {
   },
 
   async "session/close"(params) {
-    const s = sessions.get(params.sessionId);
-    if (s?.turn) {
-      s.turn.cancelled = true;
-      s.turn.cancel();
-    }
+    sessions.get(params.sessionId)?.turn?.cancel();
     sessions.delete(params.sessionId);
     return {};
   },
 
   async "session/delete"(params) {
     // The T3 thread stays; only this agent's record of the session goes.
+    sessions.get(params.sessionId)?.turn?.cancel();
+    if (starting.has(params.sessionId)) deleted.add(params.sessionId);
     sessions.delete(params.sessionId);
     forget(params.sessionId);
     return {};
@@ -575,36 +628,36 @@ const handlers = {
     const text = promptText(params.prompt);
     if (!text) return { stopReason: "end_turn" };
 
-    let onCancel;
-    const turn = { cancelled: false, whenCancelled: new Promise((r) => (onCancel = r)), cancel: () => onCancel(CANCELLED) };
+    const turn = newTurn();
     s.turn = turn;
     try {
-      let threadId = s.threadId;
       let runId;
       try {
         // A start Tern stopped waiting for may still be on its way.
-        if (!threadId && s.starting) {
-          await s.starting.catch(() => {});
-          threadId = s.threadId;
+        const pending = starting.get(sessionId);
+        if (!s.threadId && pending) {
+          const settled = await Promise.race([pending.then(() => true, () => true), turn.whenCancelled]);
+          if (settled === CANCELLED) return { stopReason: "cancelled" };
+        }
+        const failed = startFailures.get(sessionId);
+        startFailures.delete(sessionId);
+        if (!s.threadId && failed) {
+          const maybe = failed.timedOut ? " It may still have made a thread, so check T3 Code." : "";
+          say(sessionId, `Your last message didn't start a thread: ${failed.message}${maybe} Starting one with this message.\n\n`);
         }
         // Delivery carries on if Tern cancels: a start still records its
         // thread when it lands, so the next message goes to it.
-        const delivery = threadId
-          ? t3Json(["thread", "send", threadId, "-"], { cwd: workdir(s), stdin: text, timeout: T3_START_TIMEOUT_MS })
-          : (s.starting = startThread(s, text)
-              .then((started) => {
-                adopt(sessionId, s, started);
-                return started;
-              })
-              .finally(() => {
-                s.starting = null;
-              }));
+        const delivery = s.threadId
+          ? t3Json(["thread", "send", s.threadId, "-"], { cwd: workdir(s), stdin: text, timeout: T3_START_TIMEOUT_MS })
+          : beginStart(sessionId, s, text);
         delivery.catch(() => {});
         const result = await Promise.race([delivery, turn.whenCancelled]);
         if (result === CANCELLED) return { stopReason: "cancelled" };
-        threadId = s.threadId;
+        // This turn saw the outcome, so it reports any failure itself.
+        startFailures.delete(sessionId);
         runId = result.runId;
       } catch (err) {
+        startFailures.delete(sessionId);
         // ACP wants `cancelled` after a cancel, whatever else went wrong.
         if (turn.cancelled) return { stopReason: "cancelled" };
         if (err instanceof T3Error) {
@@ -615,7 +668,7 @@ const handlers = {
         throw err;
       }
       if (!runId) return { stopReason: turn.cancelled ? "cancelled" : "end_turn" };
-      const stopReason = await follow(sessionId, s, threadId, runId, turn);
+      const stopReason = await follow(sessionId, s, s.threadId, runId, turn);
       if (stopReason === "cancelled") {
         say(sessionId, "\n\nStopped following. The t3 CLI can't interrupt a run, so it keeps going in T3 Code.");
       }
@@ -628,11 +681,7 @@ const handlers = {
 
 const notifications = {
   "session/cancel"(params) {
-    const s = sessions.get(params?.sessionId);
-    if (s?.turn) {
-      s.turn.cancelled = true;
-      s.turn.cancel();
-    }
+    sessions.get(params?.sessionId)?.turn?.cancel();
   },
 };
 
