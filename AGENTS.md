@@ -56,6 +56,8 @@ its next reload. Work on a second change in a separate `git worktree`, and link 
 
 - Tern finds custom agents in `settings.json` under `agents.custom` (`id`, `name`, `command`, `args`, `env`); ids
   `claude`, `codex` and `copilot` are taken. `tern acp <id>` opens one in a chat; `tern ctl … prefs agents` shows the picker.
+- A chat pane keeps one agent process for its life: `/new` reuses it. To load edits to `acp/`, close the pane and open a
+  new chat (`tern acp t3`).
 - A new chat has no thread until its first message, so the agent hands Tern a `t3-new-<uuid>` session id and records
   which thread it became in `~/.local/state/tern-t3/acp-sessions.json`. Other session ids are T3 thread ids.
 - Tern's chat shows two config option categories as chips under the message box: `model`, and `mode` (which ⇧Tab
